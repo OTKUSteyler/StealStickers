@@ -27,13 +27,19 @@ let unpatches = [];
 function extractStickerInfo(message) {
     if (!message) return null;
 
-    // Check message.sticker_items array (most common)
+    // Check message.stickerItems array (camelCase - the correct property!)
+    if (message.stickerItems && Array.isArray(message.stickerItems) && message.stickerItems.length > 0) {
+        const sticker = message.stickerItems[0];
+        return buildStickerData(sticker);
+    }
+
+    // Check message.sticker_items array (snake_case - alternative)
     if (message.sticker_items && Array.isArray(message.sticker_items) && message.sticker_items.length > 0) {
         const sticker = message.sticker_items[0];
         return buildStickerData(sticker);
     }
 
-    // Check message.stickers array (alternative)
+    // Check message.stickers array (fallback)
     if (message.stickers && Array.isArray(message.stickers) && message.stickers.length > 0) {
         const sticker = message.stickers[0];
         return buildStickerData(sticker);
@@ -44,10 +50,24 @@ function extractStickerInfo(message) {
 
 /**
  * Build sticker data object
+ * Format types:
+ * 1 = PNG (static)
+ * 2 = APNG (animated PNG)
+ * 3 = Lottie (JSON animation)
+ * 4 = GIF (animated GIF)
  */
 function buildStickerData(sticker) {
     const formatType = sticker.format_type || 1;
-    const ext = formatType === 3 ? "json" : formatType === 2 ? "apng" : "png";
+    
+    // Map format type to file extension
+    let ext;
+    switch (formatType) {
+        case 1: ext = "png"; break;   // PNG
+        case 2: ext = "apng"; break;  // APNG
+        case 3: ext = "json"; break;  // Lottie
+        case 4: ext = "gif"; break;   // GIF
+        default: ext = "png"; break;  // Default to PNG
+    }
     
     return {
         id: sticker.id,
