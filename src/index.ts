@@ -133,6 +133,36 @@ async function downloadSticker(stickerInfo) {
 // ---------------------------------------------------------------------------
 
 /**
+ * Recursively walk React tree and inject our option
+ */
+function walkTreeAndInject(tree, downloadAction, depth = 0) {
+    if (!tree || depth > 10) return false; // Prevent infinite recursion
+    
+    // Check if this node has an options array
+    if (tree.props?.options && Array.isArray(tree.props.options)) {
+        console.log(`[StealStickers] Found options array at depth ${depth}:`, tree.props.options.map(o => o.label));
+        tree.props.options.push(downloadAction);
+        console.log("[StealStickers] ✅ Injected download option!");
+        return true;
+    }
+    
+    // Recurse into children
+    if (tree.props?.children) {
+        if (Array.isArray(tree.props.children)) {
+            for (const child of tree.props.children) {
+                if (walkTreeAndInject(child, downloadAction, depth + 1)) {
+                    return true;
+                }
+            }
+        } else {
+            return walkTreeAndInject(tree.props.children, downloadAction, depth + 1);
+        }
+    }
+    
+    return false;
+}
+
+/**
  * Patch the sticker_detail_action_sheet
  */
 function patchStickerDetailSheet() {
@@ -145,12 +175,14 @@ function patchStickerDetailSheet() {
             return;
         }
 
-        console.log("[StealStickers] Found sticker_detail_action_sheet");
+        console.log("[StealStickers] ✅ Found sticker_detail_action_sheet");
 
         // Patch the component
         const unpatch = after("type", StickerDetailSheet, (args, res) => {
             try {
                 const props = args[0];
+                
+                console.log("[StealStickers] Sheet opened! Props keys:", Object.keys(props || {}));
                 
                 // Extract sticker info from various possible locations
                 const stickerInfo = extractStickerInfo(props) || 
@@ -158,60 +190,50 @@ function patchStickerDetailSheet() {
                                   extractStickerInfo(props?.message);
                 
                 if (!stickerInfo) {
-                    console.warn("[StealStickers] No sticker info found in props:", Object.keys(props || {}));
+                    console.warn("[StealStickers] ❌ No sticker info found");
+                    console.log("[StealStickers] Props:", JSON.stringify(props, null, 2));
                     return res;
                 }
 
-                console.log("[StealStickers] Found sticker:", stickerInfo.name, stickerInfo.id);
+                console.log("[StealStickers] ✅ Found sticker:", stickerInfo.name, `(${stickerInfo.id})`);
 
                 // Build our download action
                 const downloadAction = {
                     label: "📥 Download Sticker",
                     onPress: () => {
+                        console.log("[StealStickers] Download button pressed!");
                         downloadSticker(stickerInfo);
                     }
                 };
 
-                // Inject into the ActionSheet
-                if (res?.props) {
-                    // Try direct options array
-                    if (Array.isArray(res.props.options)) {
-                        res.props.options.push(downloadAction);
-                        return res;
-                    }
-
-                    // Try children
-                    if (res.props.children) {
-                        if (Array.isArray(res.props.children)) {
-                            // Look for options in children
-                            for (const child of res.props.children) {
-                                if (child?.props?.options && Array.isArray(child.props.options)) {
-                                    child.props.options.push(downloadAction);
-                                    return res;
-                                }
-                            }
-                            // Add as new child
-                            res.props.children.push(downloadAction);
-                        } else {
-                            res.props.children = [res.props.children, downloadAction];
-                        }
-                    } else {
-                        res.props.children = downloadAction;
-                    }
+                console.log("[StealStickers] Attempting to inject option...");
+                console.log("[StealStickers] Return value type:", res?.type?.name || typeof res);
+                
+                // Try recursive tree walk
+                if (walkTreeAndInject(res, downloadAction)) {
+                    return res;
                 }
 
+                console.warn("[StealStickers] ⚠️ Could not find options array in tree");
+                console.log("[StealStickers] Full return structure:", JSON.stringify(res, (key, val) => {
+                    if (key === 'children' && Array.isArray(val)) return `[${val.length} children]`;
+                    if (typeof val === 'function') return '[Function]';
+                    if (typeof val === 'object' && val !== null && Object.keys(val).length > 5) return '[Object]';
+                    return val;
+                }, 2));
+
             } catch (e) {
-                console.error("[StealStickers] Error in sticker detail patch:", e);
+                console.error("[StealStickers] ❌ Error in sticker detail patch:", e);
             }
             
             return res;
         });
 
         unpatches.push(unpatch);
-        console.log("[StealStickers] Patched sticker_detail_action_sheet");
+        console.log("[StealStickers] ✅ Patched sticker_detail_action_sheet");
         
     } catch (e) {
-        console.error("[StealStickers] Failed to patch sticker detail sheet:", e);
+        console.error("[StealStickers] ❌ Failed to patch sticker detail sheet:", e);
     }
 }
 
