@@ -1,260 +1,239 @@
 /**
  * StealStickers — Kettu / Bunny Plugin
  *
- * Adds a "📥 Download Sticker" button to the long-press sticker context menu.
- * Allows you to save/download stickers from any message to your device.
+ * Adds a "📥 Download Sticker" button to the MessageLongPressActionSheet
+ * when long-pressing messages that contain stickers.
  *
  * Inspired by Stealmoji by Fierdetta
- * Ported for Kettu/Bunny using FavouriteAnything pattern
+ * Built for Kettu/Bunny/Revenge
  */
 
-import { findByProps } from "@vendetta/metro";
+import { findByProps, findByName } from "@vendetta/metro";
+import { after } from "@vendetta/patcher";
 import { ReactNative as RN } from "@vendetta/metro/common";
 import { showToast } from "@vendetta/ui/toasts";
 
-const { Platform } = RN;
+const { Platform, Linking } = RN;
+
+let unpatches = [];
 
 // ---------------------------------------------------------------------------
-// Lazy module cache
-// ---------------------------------------------------------------------------
-let _stickerActions = null;   // Module that builds sticker context menu options
-let _fileManager = null;       // Module for downloading files
-
-/**
- * Find the module that handles sticker context menu actions.
- * Discord mobile typically has actions like "Mark as Read", etc.
- */
-function getStickerActionsModule() {
-    if (_stickerActions) return _stickerActions;
-    try {
-        // Try to find by common sticker-related props
-        _stickerActions = 
-            findByProps("openStickerPickerActionSheet", false) ||
-            findByProps("getStickerById", false) ||
-            findByProps("fetchSticker", false);
-    } catch (e) {
-        console.warn("[StealStickers] Could not find sticker actions module:", e);
-    }
-    return _stickerActions;
-}
-
-/**
- * Find Discord's file download/save module
- */
-function getFileManagerModule() {
-    if (_fileManager) return _fileManager;
-    try {
-        _fileManager = 
-            findByProps("downloadFile", false) ||
-            findByProps("saveFile", false) ||
-            findByProps("downloadAsset", false);
-    } catch (e) {
-        console.warn("[StealStickers] Could not find file manager module:", e);
-    }
-    return _fileManager;
-}
-
-// ---------------------------------------------------------------------------
-// Helper functions
+// Sticker info extraction
 // ---------------------------------------------------------------------------
 
 /**
- * Extract sticker information from a message or sticker object
- * @param {object} context - Could be message object or direct sticker data
- * @returns {{ id: string, name: string, url: string, format: string } | null}
+ * Extract sticker data from a message
  */
-function extractStickerInfo(context) {
-    if (!context) return null;
+function extractStickerInfo(message) {
+    if (!message) return null;
 
-    // Try to extract sticker from message.stickers array
-    if (context.stickers && Array.isArray(context.stickers) && context.stickers.length > 0) {
-        const sticker = context.stickers[0]; // First sticker in message
-        return {
-            id: sticker.id,
-            name: sticker.name || "sticker",
-            url: getStickerURL(sticker),
-            format: sticker.format_type || 1  // 1 = PNG, 2 = APNG, 3 = Lottie
-        };
+    // Check message.sticker_items array (most common)
+    if (message.sticker_items && Array.isArray(message.sticker_items) && message.sticker_items.length > 0) {
+        const sticker = message.sticker_items[0];
+        return buildStickerData(sticker);
     }
 
-    // Try direct sticker object (if context IS the sticker)
-    if (context.id && context.format_type) {
-        return {
-            id: context.id,
-            name: context.name || "sticker",
-            url: getStickerURL(context),
-            format: context.format_type || 1
-        };
+    // Check message.stickers array (alternative)
+    if (message.stickers && Array.isArray(message.stickers) && message.stickers.length > 0) {
+        const sticker = message.stickers[0];
+        return buildStickerData(sticker);
     }
 
     return null;
 }
 
 /**
- * Build CDN URL for a sticker
- * @param {object} sticker - Sticker data object
- * @returns {string} Full CDN URL
+ * Build sticker data object
  */
-function getStickerURL(sticker) {
-    const format = sticker.format_type === 3 ? "json" : "png"; // Lottie = JSON, others = PNG
-    return `https://cdn.discordapp.com/stickers/${sticker.id}.${format}`;
+function buildStickerData(sticker) {
+    const formatType = sticker.format_type || 1;
+    const ext = formatType === 3 ? "json" : formatType === 2 ? "apng" : "png";
+    
+    return {
+        id: sticker.id,
+        name: sticker.name || "sticker",
+        url: `https://cdn.discordapp.com/stickers/${sticker.id}.${ext}`,
+        format: formatType,
+        extension: ext
+    };
 }
 
-/**
- * Get file extension based on sticker format
- */
-function getFileExtension(formatType) {
-    switch (formatType) {
-        case 1: return "png";     // PNG
-        case 2: return "apng";    // APNG (animated PNG)
-        case 3: return "json";    // Lottie JSON
-        default: return "png";
-    }
-}
+// ---------------------------------------------------------------------------
+// Download functionality
+// ---------------------------------------------------------------------------
 
 /**
  * Download sticker to device
  */
 async function downloadSticker(stickerInfo) {
     try {
-        const fileManager = getFileManagerModule();
-        const ext = getFileExtension(stickerInfo.format);
-        const filename = `${stickerInfo.name.replace(/[^a-zA-Z0-9]/g, "_")}_${stickerInfo.id}.${ext}`;
+        const filename = `${stickerInfo.name.replace(/[^a-zA-Z0-9]/g, "_")}_${stickerInfo.id}.${stickerInfo.extension}`;
 
-        // Try using Discord's native download function
+        // Try to find Discord's file manager
+        const fileManager = findByProps("downloadFile", false) || 
+                           findByProps("saveFile", false) ||
+                           findByProps("downloadAsset", false);
+
         if (fileManager?.downloadFile) {
             await fileManager.downloadFile(stickerInfo.url, filename);
-            showToast(`Downloaded ${stickerInfo.name}! 📥`);
+            showToast(`Downloaded ${stickerInfo.name}! 📥`, "success");
             return;
         }
 
         if (fileManager?.saveFile) {
             await fileManager.saveFile(stickerInfo.url, filename);
-            showToast(`Saved ${stickerInfo.name}! 📥`);
+            showToast(`Saved ${stickerInfo.name}! 📥`, "success");
             return;
         }
 
-        // Fallback: Use React Native's Linking or Clipboard
-        if (Platform.OS === "android" || Platform.OS === "ios") {
-            // Try to open in browser as last resort
-            const { Linking } = RN;
+        // Fallback: Open in browser/external app
+        if (Linking) {
             await Linking.openURL(stickerInfo.url);
-            showToast("Opened sticker URL in browser 🌐");
+            showToast("Opened sticker URL 🌐", "info");
         } else {
-            showToast("Download not supported on this platform ❌");
+            showToast("Download not available ❌", "error");
         }
 
     } catch (e) {
         console.error("[StealStickers] Download failed:", e);
-        showToast(`Failed to download sticker: ${e.message}` );
+        showToast(`Failed: ${e.message}`, "error");
     }
 }
 
 // ---------------------------------------------------------------------------
-// Build the action item
+// ActionSheet patching
 // ---------------------------------------------------------------------------
 
 /**
- * Creates the "Download Sticker" action for the context menu
+ * Find and patch the MessageLongPressActionSheet
  */
-function buildDownloadAction(stickerInfo) {
-    return {
-        key: "stealSticker",
-        label: "📥 Download Sticker",
-        onPress: () => {
-            downloadSticker(stickerInfo);
-        }
-    };
-}
-
-// ---------------------------------------------------------------------------
-// Patching logic
-// ---------------------------------------------------------------------------
-
-let unpatch = null;
-
-function applyPatch() {
-    // Get patcher from global bunny object
-    const bunnyAPI = typeof window !== "undefined" ? window.bunny : null;
-    const { patcher } = bunnyAPI || {};
-    
-    if (!patcher || typeof patcher.after !== "function") {
-        console.error("[StealStickers] Patcher not available!");
-        return;
-    }
-
-    // Strategy: Patch the message context menu builder
-    // This is similar to how FavouriteAnything patches message actions
+function patchActionSheet() {
     try {
-        const messageActionsModule = findByProps("markAsUnread", "suppressEmbeds", false);
+        // Find the ActionSheet component by name (shown in your screenshot)
+        const ActionSheet = findByName("MessageLongPressActionSheet", false);
         
-        if (!messageActionsModule) {
-            console.warn("[StealStickers] Could not find message actions module");
+        if (!ActionSheet) {
+            console.warn("[StealStickers] MessageLongPressActionSheet not found");
             return;
         }
 
-        // Find the patchable function
-        const candidates = ["getActions", "buildActions", "default"];
-        let patchKey = null;
+        // Patch the component
+        const unpatch = after("type", ActionSheet, (args, res) => {
+            try {
+                const props = args[0];
+                const message = props?.message;
+                
+                if (!message) return res;
 
-        for (const name of candidates) {
-            if (typeof messageActionsModule[name] === "function") {
-                patchKey = name;
-                break;
-            }
-        }
+                const stickerInfo = extractStickerInfo(message);
+                if (!stickerInfo) return res; // No sticker in this message
 
-        if (!patchKey) {
-            console.error(
-                "[StealStickers] No patchable function found. " +
-                "Available keys:",
-                Object.keys(messageActionsModule)
-            );
-            return;
-        }
+                // Build our download action
+                const downloadAction = {
+                    key: "steal-sticker",
+                    icon: "📥", // Some ActionSheets support icon prop
+                    label: "Download Sticker",
+                    onPress: () => {
+                        downloadSticker(stickerInfo);
+                    }
+                };
 
-        unpatch = patcher.after(patchKey, messageActionsModule, function afterActions(args, ret) {
-            // Extract message from args
-            const message =
-                (args[0] && args[0].message) ||
-                args[0] ||
-                null;
+                // Inject into the ActionSheet options
+                // The structure from your screenshot shows options in an array
+                if (res?.props) {
+                    // Try direct options array
+                    if (Array.isArray(res.props.options)) {
+                        res.props.options.push(downloadAction);
+                        return res;
+                    }
 
-            const stickerInfo = extractStickerInfo(message);
-            if (!stickerInfo) return ret; // No sticker, don't modify menu
-
-            // Inject our download action
-
-            // Shape A: ret is the options array
-            if (Array.isArray(ret)) {
-                ret.push(buildDownloadAction(stickerInfo));
-                return ret;
-            }
-
-            // Shape B: ret is a React element with options in props
-            if (ret && ret.props) {
-                if (Array.isArray(ret.props.options)) {
-                    ret.props.options.push(buildDownloadAction(stickerInfo));
-                    return ret;
-                }
-                // One level deeper
-                if (Array.isArray(ret.props.children)) {
-                    for (const child of ret.props.children) {
-                        if (child && child.props && Array.isArray(child.props.options)) {
-                            child.props.options.push(buildDownloadAction(stickerInfo));
-                            return ret;
+                    // Try children array
+                    if (res.props.children) {
+                        if (Array.isArray(res.props.children)) {
+                            // Look for options in children
+                            for (const child of res.props.children) {
+                                if (child?.props?.options && Array.isArray(child.props.options)) {
+                                    child.props.options.push(downloadAction);
+                                    return res;
+                                }
+                            }
+                            // Add as new child if no options found
+                            res.props.children.push(downloadAction);
+                        } else {
+                            res.props.children = [res.props.children, downloadAction];
                         }
+                    } else {
+                        res.props.children = downloadAction;
                     }
                 }
-            }
 
+            } catch (e) {
+                console.error("[StealStickers] Error in ActionSheet patch:", e);
+            }
+            
+            return res;
+        });
+
+        unpatches.push(unpatch);
+        console.log("[StealStickers] Patched MessageLongPressActionSheet");
+        
+    } catch (e) {
+        console.error("[StealStickers] Failed to patch ActionSheet:", e);
+    }
+}
+
+/**
+ * Alternative: Patch the action builder if ActionSheet patch doesn't work
+ */
+function patchActionBuilder() {
+    try {
+        // Find the module that builds message actions
+        const actionsModule = findByProps("getMessageActions", false) ||
+                             findByProps("buildMessageActions", false);
+        
+        if (!actionsModule) {
+            console.warn("[StealStickers] Actions module not found");
+            return;
+        }
+
+        const target = actionsModule.getMessageActions || 
+                      actionsModule.buildMessageActions ||
+                      actionsModule.default;
+
+        if (typeof target !== "function") {
+            console.warn("[StealStickers] No patchable function in actions module");
+            return;
+        }
+
+        const unpatch = after("getMessageActions", actionsModule, (args, ret) => {
+            try {
+                const message = args[0];
+                const stickerInfo = extractStickerInfo(message);
+                
+                if (!stickerInfo) return ret;
+
+                const downloadAction = {
+                    key: "steal-sticker",
+                    label: "📥 Download Sticker",
+                    onPress: () => downloadSticker(stickerInfo)
+                };
+
+                if (Array.isArray(ret)) {
+                    ret.push(downloadAction);
+                }
+
+            } catch (e) {
+                console.error("[StealStickers] Error in action builder patch:", e);
+            }
+            
             return ret;
         });
 
-        console.log("[StealStickers] Patch applied");
-
+        unpatches.push(unpatch);
+        console.log("[StealStickers] Patched action builder");
+        
     } catch (e) {
-        console.error("[StealStickers] Failed to apply patch:", e);
+        console.error("[StealStickers] Failed to patch action builder:", e);
     }
 }
 
@@ -265,35 +244,36 @@ function applyPatch() {
 export default {
     onLoad: () => {
         try {
-            applyPatch();
-            console.log("[StealStickers] Enabled 📥");
-        } catch (e) {
-            console.error("[StealStickers] Failed to enable:", e);
-            // Clean up on failure
-            if (typeof unpatch === "function") {
-                try {
-                    unpatch();
-                } catch {}
-                unpatch = null;
+            // Try both patching strategies
+            patchActionSheet();
+            patchActionBuilder();
+
+            if (unpatches.length === 0) {
+                console.warn(
+                    "[StealStickers] No patches applied. " +
+                    "The plugin may not work until Discord loads the ActionSheet."
+                );
+            } else {
+                console.log(`[StealStickers] Enabled with ${unpatches.length} patches 📥`);
             }
+        } catch (e) {
+            console.error("[StealStickers] Failed to load:", e);
         }
     },
 
     onUnload: () => {
         // Immediate cleanup
-        const patchToRemove = unpatch;
-        unpatch = null;
-        _stickerActions = null;
-        _fileManager = null;
-        
-        if (typeof patchToRemove === "function") {
+        const patchesToClean = [...unpatches];
+        unpatches = [];
+
+        for (const unpatch of patchesToClean) {
             try {
-                patchToRemove();
+                unpatch?.();
             } catch (e) {
-                console.error("[StealStickers] Error during unpatch:", e);
+                // Silently ignore unpatch errors
             }
         }
-        
+
         console.log("[StealStickers] Disabled");
     }
 };
